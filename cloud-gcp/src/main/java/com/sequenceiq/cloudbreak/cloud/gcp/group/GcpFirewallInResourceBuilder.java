@@ -134,10 +134,10 @@ public class GcpFirewallInResourceBuilder extends AbstractGcpGroupBuilder {
             rule.setIPProtocol(securityRule.getProtocol());
             List<String> ports = new ArrayList<>();
             for (PortDefinition portDefinition : securityRule.getPorts()) {
-                if (portDefinition.getFrom().equals(portDefinition.getTo())) {
-                    ports.add(portDefinition.getFrom());
-                } else {
+                if (portDefinition.isRange()) {
                     ports.add(String.format("%s-%s", portDefinition.getFrom(), portDefinition.getTo()));
+                } else {
+                    ports.add(portDefinition.getFrom());
                 }
             }
             rule.setPorts(ports);

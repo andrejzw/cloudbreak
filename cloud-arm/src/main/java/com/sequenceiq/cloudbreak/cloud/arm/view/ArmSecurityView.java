@@ -18,14 +18,11 @@ public class ArmSecurityView {
             List<ArmPortView> groupPorts = new ArrayList<>();
             for (SecurityRule securityRule : group.getSecurity().getRules()) {
                 for (PortDefinition port : securityRule.getPorts()) {
-                    if (port.getFrom().equals(port.getTo())) {
-                        groupPorts.add(new ArmPortView(securityRule.getCidr(), port.getFrom(), securityRule.getProtocol()));
+                    if (port.isRange()) {
+                        String portRange = String.format("%s-%s", port.getFrom(), port.getTo());
+                        groupPorts.add(new ArmPortView(securityRule.getCidr(), portRange, securityRule.getProtocol()));
                     } else {
-                        Integer portFrom = Integer.parseInt(port.getFrom());
-                        Integer portTo = Integer.parseInt(port.getTo());
-                        for (int i = portFrom; i < portTo; i++) {
-                            groupPorts.add(new ArmPortView(securityRule.getCidr(), String.valueOf(i), securityRule.getProtocol()));
-                        }
+                        groupPorts.add(new ArmPortView(securityRule.getCidr(), port.getFrom(), securityRule.getProtocol()));
                     }
                 }
             }

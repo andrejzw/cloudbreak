@@ -19,6 +19,10 @@ public class PortDefinition {
         return to;
     }
 
+    public boolean isRange() {
+        return !from.equals(to);
+    }
+
     @Override
     public String toString() {
         return "PortDefinition{" +  "from='" + from + '\'' + ", to='" + to + '\'' + '}';
