@@ -17,6 +17,7 @@ import static java.util.Collections.singletonMap;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
@@ -33,7 +34,6 @@ import javax.inject.Inject;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -206,8 +206,10 @@ public class AmbariClusterConnector {
     private AmbariAuthenticationProvider ambariAuthenticationProvider;
 
     public void waitForAmbariServer(Stack stack) throws CloudbreakException {
-        AmbariClient ambariClient = getDefaultAmbariClient(stack);
-        AmbariStartupPollerObject ambariStartupPollerObject = new AmbariStartupPollerObject(stack, stack.getAmbariIp(), ambariClient);
+        AmbariClient defaultAmbariClient = getDefaultAmbariClient(stack);
+        AmbariClient cloudbreakAmbariClient = getAmbariClient(stack);
+        AmbariStartupPollerObject ambariStartupPollerObject = new AmbariStartupPollerObject(stack, stack.getAmbariIp(),
+                Arrays.asList(defaultAmbariClient, cloudbreakAmbariClient));
         PollingResult pollingResult = ambariStartupPollerObjectPollingService.pollWithTimeoutSingleFailure(ambariStartupListenerTask, ambariStartupPollerObject,
                 AMBARI_POLLING_INTERVAL, MAX_ATTEMPTS_FOR_AMBARI_SERVER_STARTUP);
         if (isSuccess(pollingResult)) {
@@ -223,8 +225,10 @@ public class AmbariClusterConnector {
     public Cluster buildAmbariCluster(Stack stack) {
         Cluster cluster = stack.getCluster();
         try {
-            cluster.setCreationStarted(new Date().getTime());
-            cluster = clusterRepository.save(cluster);
+            if (cluster.getCreationStarted() == null) {
+                cluster.setCreationStarted(new Date().getTime());
+                cluster = clusterRepository.save(cluster);
+            }
 
             String blueprintText = updateBlueprintWithInputs(cluster, cluster.getBlueprint());
 
@@ -247,15 +251,19 @@ public class AmbariClusterConnector {
             String blueprintName = cluster.getBlueprint().getBlueprintName();
             String configStrategy = cluster.getConfigStrategy().name();
             String clusterTemplate;
-            if (cluster.isSecure()) {
-                clusterTemplate = ambariClient.createSecureCluster(clusterName, blueprintName, hostGroupMappings, configStrategy,
-                        ambariAuthenticationProvider.getAmbariPassword(cluster),
-                        cluster.getKerberosAdmin() + PRINCIPAL, cluster.getKerberosPassword(), KEY_TYPE);
+            if (ambariClient.getClusterName() == null) {
+                if (cluster.isSecure()) {
+                    clusterTemplate = ambariClient.createSecureCluster(clusterName, blueprintName, hostGroupMappings, configStrategy,
+                            ambariAuthenticationProvider.getAmbariPassword(cluster),
+                            cluster.getKerberosAdmin() + PRINCIPAL, cluster.getKerberosPassword(), KEY_TYPE);
+                } else {
+                    clusterTemplate = ambariClient.createCluster(clusterName, blueprintName, hostGroupMappings, configStrategy,
+                            ambariAuthenticationProvider.getAmbariPassword(cluster));
+                }
+                LOGGER.info("Submitted cluster creation template: {}", JsonUtil.minify(clusterTemplate));
             } else {
-                clusterTemplate = ambariClient.createCluster(clusterName, blueprintName, hostGroupMappings, configStrategy,
-                        ambariAuthenticationProvider.getAmbariPassword(cluster));
+                LOGGER.info("Ambari cluster already exists: {}", clusterName);
             }
-            LOGGER.info("Submitted cluster creation template: {}", JsonUtil.minify(clusterTemplate));
             PollingResult pollingResult = ambariOperationService.waitForOperationsToStart(stack, ambariClient, singletonMap("INSTALL_START", 1),
                     START_OPERATION_STATE);
             checkPollingResult(pollingResult, cloudbreakMessagesService.getMessage(Msg.AMBARI_CLUSTER_INSTALL_FAILED.code()));
@@ -383,13 +391,11 @@ public class AmbariClusterConnector {
         try {
             ambariClient.createUser(newUserName, newPassword, true);
         } catch (Exception e) {
-            if (e instanceof HttpResponseException && ((HttpResponseException) e).getStatusCode() == HttpStatus.INTERNAL_SERVER_ERROR.value()) {
-                try {
-                    ambariClient = getPrivateSecureAmbariClient(stack, newUserName, newPassword);
-                    ambariClient.ambariServerVersion();
-                } catch (Exception ie) {
-                    throw e;
-                }
+            try {
+                ambariClient = getPrivateSecureAmbariClient(stack, newUserName, newPassword);
+                ambariClient.ambariServerVersion();
+            } catch (Exception ie) {
+                throw e;
             }
         }
         ambariClient.deleteUser(cluster.getUserName());
@@ -402,9 +408,11 @@ public class AmbariClusterConnector {
         try {
             ambariClient.changePassword(cluster.getUserName(), cluster.getPassword(), newPassword, true);
         } catch (Exception e) {
-            if (e instanceof HttpResponseException && ((HttpResponseException) e).getStatusCode() == HttpStatus.FORBIDDEN.value()) {
+            try {
                 ambariClient = getPrivateSecureAmbariClient(stack, cluster.getUserName(), newPassword);
                 ambariClient.ambariServerVersion();
+            } catch (Exception ie) {
+                throw e;
             }
         }
     }
@@ -415,14 +423,42 @@ public class AmbariClusterConnector {
         String userName = cluster.getUserName();
         String password = cluster.getPassword();
         AmbariClient ambariClient = getDefaultAmbariClient(stack);
-        ambariClient.createUser(ambariAuthenticationProvider.getAmbariUserName(cluster),
-                ambariAuthenticationProvider.getAmbariPassword(cluster), true);
+        String cloudbreakUserName = ambariAuthenticationProvider.getAmbariUserName(cluster);
+        String cloudbreakPassword = ambariAuthenticationProvider.getAmbariPassword(cluster);
+        try {
+            ambariClient.createUser(cloudbreakUserName, cloudbreakPassword, true);
+        } catch (Exception e) {
+            try {
+                ambariClient = getAmbariClient(stack);
+                ambariClient.ambariServerVersion();
+            } catch (Exception ie) {
+                throw e;
+            }
+        }
         if (ADMIN.equals(userName)) {
             if (!ADMIN.equals(password)) {
-                ambariClient.changePassword(ADMIN, ADMIN, password, true);
+                try {
+                    ambariClient.changePassword(ADMIN, ADMIN, password, true);
+                } catch (Exception e) {
+                    try {
+                        ambariClient = getAmbariClient(stack);
+                        ambariClient.ambariServerVersion();
+                    } catch (Exception ie) {
+                        throw e;
+                    }
+                }
             }
         } else {
-            ambariClient.createUser(userName, password, true);
+            try {
+                ambariClient.createUser(userName, password, true);
+            } catch (Exception e) {
+                try {
+                    ambariClient = getAmbariClient(stack);
+                    ambariClient.ambariServerVersion();
+                } catch (Exception ie) {
+                    throw e;
+                }
+            }
             ambariClient.deleteUser(ADMIN);
         }
     }
@@ -724,7 +760,7 @@ public class AmbariClusterConnector {
             ambariClient.addBlueprint(blueprintText);
         } catch (IOException e) {
             if ("Conflict".equals(e.getMessage())) {
-                throw new BadRequestException("Ambari blueprint already exists.", e);
+                LOGGER.info("Ambari blueprint already exists for stack: {}", stack.getId());
             } else if (e instanceof HttpResponseException) {
                 String errorMessage = AmbariClientExceptionUtil.getErrorMessage((HttpResponseException) e);
                 throw new CloudbreakServiceException("Ambari Blueprint could not be added: " + errorMessage, e);
